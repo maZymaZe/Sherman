@@ -6,7 +6,7 @@ int main() {
   DSMConfig config;
   config.machineNR = 2;
   DSM *dsm = DSM::getInstance(config);
-
+ 
   dsm->registerThread();
 
   auto tree = new Tree(dsm);
@@ -14,43 +14,33 @@ int main() {
   Value v;
 
   if (dsm->getMyNodeID() != 0) {
-    while (true)
-      ;
+    while(true);
   }
 
+
   for (uint64_t i = 1; i < 10240; ++i) {
-    tree->insert(i, i * 2);
+    tree->insert(int2key(i), i * 2);
   }
+  printf("insert passed.\n");
 
   for (uint64_t i = 10240 - 1; i >= 1; --i) {
-    tree->insert(i, i * 3);
+    tree->insert(int2key(i), i * 3);
   }
 
+  printf("update passed.\n");
+
   for (uint64_t i = 1; i < 10240; ++i) {
-    auto res = tree->search(i, v);
+    auto res = tree->search(int2key(i), v);
     assert(res && v == i * 3);
-    std::cout << "search result:  " << res << " v: " << v << std::endl;
   }
 
-  for (uint64_t i = 1; i < 10240; ++i) {
-    tree->del(i);
-  }
+  printf("search passed.\n");
 
-  for (uint64_t i = 1; i < 10240; ++i) {
-    auto res = tree->search(i, v);
-    std::cout << "search result:  " << res << std::endl;
-  }
+  std::map<Key, Value> ret;
+  tree->range_query(int2key(1), int2key(800), ret);
+  for (uint64_t j = 1; j < 800; ++ j) assert(ret[int2key(j)] == j * 3);
 
-  for (uint64_t i = 10240 - 1; i >= 1; --i) {
-    tree->insert(i, i * 3);
-  }
-
-  for (uint64_t i = 1; i < 10240; ++i) {
-    auto res = tree->search(i, v);
-    assert(res && v == i * 3);
-    std::cout << "search result:  " << res << " v: " << v << std::endl;
-  }
-
+  printf("range query passed.\n");
   printf("Hello\n");
 
   while (true)

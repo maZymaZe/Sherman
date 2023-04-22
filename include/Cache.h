@@ -8,6 +8,7 @@ class Cache {
 
 public:
   Cache(const CacheConfig &cache_config);
+  ~Cache();
 
   uint64_t data;
   uint64_t size;

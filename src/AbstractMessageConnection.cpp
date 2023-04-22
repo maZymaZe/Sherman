@@ -20,6 +20,8 @@ AbstractMessageConnection::AbstractMessageConnection(
   messageLkey = messageMR->lkey;
 }
 
+AbstractMessageConnection::~AbstractMessageConnection() { hugePageFree((void *)messagePool, 2 * messageNR * MESSAGE_SIZE); }
+
 void AbstractMessageConnection::initRecv() {
   subNR = messageNR / kBatchCount;
 

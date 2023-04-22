@@ -77,6 +77,10 @@ class InlineSkipList {
     typename std::remove_reference<Comparator>::type::DecodedType;
 
   static const uint16_t kMaxPossibleHeight = 32;
+  std::atomic<int> height_sum;
+  int GetHeightSum() const {
+    return height_sum.load();
+  }
 
   // Create a new InlineSkipList object that will use "cmp" for comparing
   // keys, and will allocate memory using "*allocator".  Objects allocated
@@ -610,6 +614,7 @@ InlineSkipList<Comparator>::InlineSkipList(const Comparator cmp,
       head_(AllocateNode(0, max_height)),
       max_height_(1),
       seq_splice_(AllocateSplice()) {
+  height_sum = 0;
   assert(max_height > 0 && kMaxHeight_ == static_cast<uint32_t>(max_height));
   assert(branching_factor > 1 &&
          kBranching_ == static_cast<uint32_t>(branching_factor));
@@ -622,7 +627,9 @@ InlineSkipList<Comparator>::InlineSkipList(const Comparator cmp,
 
 template <class Comparator>
 char* InlineSkipList<Comparator>::AllocateKey(size_t key_size) {
-  return const_cast<char*>(AllocateNode(key_size, RandomHeight())->Key());
+  int height = RandomHeight();
+  height_sum += height;
+  return const_cast<char*>(AllocateNode(key_size, height)->Key());
 }
 
 template <class Comparator>

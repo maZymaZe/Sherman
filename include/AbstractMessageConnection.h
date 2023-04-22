@@ -41,6 +41,7 @@ public:
   AbstractMessageConnection(ibv_qp_type type, uint16_t sendPadding,
                             uint16_t recvPadding, RdmaContext &ctx, ibv_cq *cq,
                             uint32_t messageNR);
+  ~AbstractMessageConnection();
 
   void initRecv();
 

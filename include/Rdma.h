@@ -15,9 +15,17 @@
 
 #include "Debug.h"
 
+#define MAX_POST_LIST 32
 #define DCT_ACCESS_KEY 3185
 #define UD_PKEY 0x11111111
 #define PSN 3185
+#define NET_DEV_NAME "enp202s0f0" // [CONFIG]
+#define IB_DEV_NAME_IDX '2'       // [CONFIG]
+#define MLX_PORT 1                // [CONFIG]
+#define ON_CHIP_SIZE 128
+
+
+constexpr int kQPMaxDepth = 4096;
 
 constexpr int kOroMax = 3;
 struct RdmaOpRegion {
@@ -56,7 +64,7 @@ struct Region {
 };
 
 //// Resource.cpp
-bool createContext(RdmaContext *context, uint8_t port = 1, int gidIndex = 3,
+bool createContext(RdmaContext *context, uint8_t port = MLX_PORT, int gidIndex = 1,
                    uint8_t devIndex = 0);
 bool destoryContext(RdmaContext *context);
 
@@ -65,15 +73,15 @@ ibv_mr *createMemoryRegionOnChip(uint64_t mm, uint64_t mmSize,
                                  RdmaContext *ctx);
 
 bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *cq,
-                     RdmaContext *context, uint32_t qpsMaxDepth = 128,
+                     RdmaContext *context, uint32_t qpsMaxDepth = kQPMaxDepth,
                      uint32_t maxInlineData = 0);
 
 bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *send_cq,
                      ibv_cq *recv_cq, RdmaContext *context,
-                     uint32_t qpsMaxDepth = 128, uint32_t maxInlineData = 0);
+                     uint32_t qpsMaxDepth = kQPMaxDepth, uint32_t maxInlineData = 0);
 
 bool createDCTarget(ibv_exp_dct **dct, ibv_cq *cq, RdmaContext *context,
-                    uint32_t qpsMaxDepth = 128, uint32_t maxInlineData = 0);
+                    uint32_t qpsMaxDepth = kQPMaxDepth, uint32_t maxInlineData = 0);
 void fillAhAttr(ibv_ah_attr *attr, uint32_t remoteLid, uint8_t *remoteGid,
                 RdmaContext *context);
 

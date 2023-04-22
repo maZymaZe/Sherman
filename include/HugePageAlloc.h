@@ -20,4 +20,12 @@ inline void *hugePageAlloc(size_t size) {
     return res;
 }
 
+inline void hugePageFree(void *addr, size_t size) {
+    int res = munmap(addr, size);
+    if (res == -1) {
+        Debug::notifyError("%s munmap failed! %d\n", getIP(), errno);
+    }
+    return;
+}
+
 #endif /* __HUGEPAGEALLOC_H__ */

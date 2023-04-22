@@ -7,9 +7,9 @@
 class RdmaBuffer {
 
 private:
-  static const int kPageBufferCnt = 8;    // async, buffer safty
-  static const int kSiblingBufferCnt = 8; // async, buffer safty
-  static const int kCasBufferCnt = 8;     // async, buffer safty
+  static const int kPageBufferCnt = 128;    // async, buffer safty  [DEBUG] 64
+  static const int kSiblingBufferCnt = 16; // async, buffer safty
+  static const int kCasBufferCnt = 128;     // async, buffer safty  [DEBUG] 16
 
   char *buffer;
 
@@ -18,7 +18,7 @@ private:
   uint64_t *zero_64bit;
   char *page_buffer;
   char *sibling_buffer;
-  char *entry_buffer;
+  char *range_buffer;
 
   int page_buffer_cur;
   int sibling_buffer_cur;
@@ -49,10 +49,11 @@ public:
     zero_64bit = (uint64_t *)((char *)unlock_buffer + sizeof(uint64_t));
     page_buffer = (char *)zero_64bit + sizeof(uint64_t);
     sibling_buffer = (char *)page_buffer + kPageSize * kPageBufferCnt;
-    entry_buffer = (char *)sibling_buffer + kPageSize * kSiblingBufferCnt;
+    range_buffer = (char *)sibling_buffer + kPageSize * kSiblingBufferCnt;
+    char * border = (char*) range_buffer + kPageSize * 16;
     *zero_64bit = 0;
 
-    assert((char *)zero_64bit + 8 - buffer < define::kPerCoroRdmaBuf);
+    assert((char *)border - buffer < define::kPerCoroRdmaBuf);
   }
 
   uint64_t *get_cas_buffer() {
@@ -70,7 +71,7 @@ public:
   }
 
   char *get_range_buffer() {
-    return page_buffer;
+    return range_buffer;
   }
 
   char *get_sibling_buffer() {
@@ -78,7 +79,6 @@ public:
     return sibling_buffer + (sibling_buffer_cur * kPageSize);
   }
 
-  char *get_entry_buffer() const { return entry_buffer; }
 };
 
 #endif // _RDMA_BUFFER_H_

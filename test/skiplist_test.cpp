@@ -53,7 +53,6 @@ int main() {
     auto buf = list.AllocateKey(sizeof(Key));
     *(Key *)buf = i;
     bool res = list.InsertConcurrently(buf);
-    (void)res;
   }
 
 

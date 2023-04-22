@@ -18,9 +18,10 @@ public:
     cur = GlobalAddress::Null();
   }
 
-  GlobalAddress malloc(size_t size, bool &need_chunck, bool align = false) {
+  GlobalAddress malloc(size_t size, bool &need_chunck, bool align = true) {
 
     if (align) {
+      size = ROUND_UP(size, ALLOC_ALLIGN_BIT);  // [DEBUG]
     }
 
     GlobalAddress res = cur;

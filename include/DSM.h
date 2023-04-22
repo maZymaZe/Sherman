@@ -10,6 +10,7 @@
 #include "GlobalAddress.h"
 #include "LocalAllocator.h"
 #include "RdmaBuffer.h"
+#include "Common.h"
 
 class DSMKeeper;
 class Directory;
@@ -17,12 +18,9 @@ class Directory;
 class DSM {
 
 public:
-  // obtain netowrk resources for a thread
   void registerThread();
-
-  // clear the network resources for all threads
-  void resetThread() { appID.store(0); }
-
+  void loadKeySpace(const std::string& load_workloads_path, bool is_str);
+  Key getRandomKey();
   static DSM *getInstance(const DSMConfig &conf);
 
   uint16_t getMyNodeID() { return myNodeID; }
@@ -52,8 +50,9 @@ public:
   void write_faa_sync(RdmaOpRegion &write_ror, RdmaOpRegion &faa_ror,
                       uint64_t add_val, CoroContext *ctx = nullptr);
 
-  void write_cas(RdmaOpRegion &write_ror, RdmaOpRegion &cas_ror, uint64_t equal,
-                 uint64_t val, bool signal = true, CoroContext *ctx = nullptr);
+  void write_cas(RdmaOpRegion &write_ror, RdmaOpRegion &cas_ror,
+                 uint64_t equal, uint64_t val, bool signal = true,
+                 CoroContext *ctx = nullptr);
   void write_cas_sync(RdmaOpRegion &write_ror, RdmaOpRegion &cas_ror,
                       uint64_t equal, uint64_t val, CoroContext *ctx = nullptr);
 
@@ -111,7 +110,7 @@ public:
                             uint64_t *rdma_buffer, uint64_t mask = 63,
                             CoroContext *ctx = nullptr);
 
-  uint64_t poll_rdma_cq(int count = 1);
+  int poll_rdma_cq(int count = 1);
   bool poll_rdma_cq_once(uint64_t &wr_id);
 
   uint64_t sum(uint64_t value) {
@@ -157,6 +156,7 @@ private:
 
   uint64_t baseAddr;
   uint32_t myNodeID;
+  uint64_t keySpaceSize;
 
   RemoteConnection *remoteInfo;
   ThreadConnection *thCon[MAX_APP_THREAD];
@@ -164,6 +164,7 @@ private:
   DSMKeeper *keeper;
 
   Directory *dirAgent[NR_DIRECTORY];
+  Key keyBuffer[MAX_KEY_SPACE_SIZE];
 
 public:
   bool is_register() { return thread_id != -1; }
@@ -198,7 +199,7 @@ public:
 inline GlobalAddress DSM::alloc(size_t size) {
 
   thread_local int next_target_node =
-      (getMyThreadID() + getMyNodeID()) % conf.machineNR;
+      (getMyThreadID() + getMyNodeID()) % MEMORY_NODE_NUM;
   thread_local int next_target_dir_id =
       (getMyThreadID() + getMyNodeID()) % NR_DIRECTORY;
 
@@ -212,7 +213,7 @@ inline GlobalAddress DSM::alloc(size_t size) {
     local_allocator.set_chunck(rpc_wait()->addr);
 
     if (++next_target_dir_id == NR_DIRECTORY) {
-      next_target_node = (next_target_node + 1) % conf.machineNR;
+      next_target_node = (next_target_node + 1) % MEMORY_NODE_NUM;
       next_target_dir_id = 0;
     }
 

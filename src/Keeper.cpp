@@ -1,5 +1,6 @@
 #include "Keeper.h"
 #include <fstream>
+#include <string>
 #include <iostream>
 #include <random>
 
@@ -72,10 +73,13 @@ void Keeper::serverEnter() {
     rc = memcached_increment(memc, SERVER_NUM_KEY, strlen(SERVER_NUM_KEY), 1,
                              &serverNum);
     if (rc == MEMCACHED_SUCCESS) {
-
+      std::string ip(getIP());
+#ifdef STATIC_ID_FROM_IP
+      myNodeID = std::atoi(ip.substr(ip.find_last_of('.') + 1).c_str()) - 1;
+#else
       myNodeID = serverNum - 1;
-
-      printf("I am server %d\n", myNodeID);
+#endif
+      Debug::notifyInfo("Compute server %d start up [%s]\n", myNodeID, ip.c_str());
       return;
     }
     fprintf(stderr, "Server %d Counld't incr value and get ID: %s, retry...\n",
@@ -138,7 +142,7 @@ char *Keeper::memGet(const char *key, uint32_t klen, size_t *v_size) {
     if (rc == MEMCACHED_SUCCESS) {
       break;
     }
-    usleep(400 * myNodeID);
+    usleep(40 * myNodeID);
   }
 
   if (v_size != nullptr) {
@@ -155,6 +159,6 @@ uint64_t Keeper::memFetchAndAdd(const char *key, uint32_t klen) {
     if (rc == MEMCACHED_SUCCESS) {
       return res;
     }
-    usleep(10000);
+    usleep(400 * myNodeID);
   }
 }

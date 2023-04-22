@@ -4,8 +4,11 @@
 #include "HugePageAlloc.h"
 
 #include "DSMKeeper.h"
+#include "Key.h"
 
 #include <algorithm>
+#include <iostream>
+#include <fstream>
 
 thread_local int DSM::thread_id = -1;
 thread_local ThreadConnection *DSM::iCon = nullptr;
@@ -34,21 +37,14 @@ DSM::DSM(const DSMConfig &conf)
   baseAddr = (uint64_t)hugePageAlloc(conf.dsmSize * define::GB);
 
   Debug::notifyInfo("shared memory size: %dGB, 0x%lx", conf.dsmSize, baseAddr);
-  Debug::notifyInfo("cache size: %dGB", conf.cacheConfig.cacheSize);
+  Debug::notifyInfo("rdma cache size: %dGB", conf.cacheConfig.cacheSize);
 
   // warmup
-  // memset((char *)baseAddr, 0, conf.dsmSize * define::GB);
-  for (uint64_t i = baseAddr; i < baseAddr + conf.dsmSize * define::GB;
-       i += 2 * define::MB) {
-    *(char *)i = 0;
-  }
-
-  // clear up first chunk
-  memset((char *)baseAddr, 0, define::kChunkSize);
+  memset((char *)baseAddr, 0, conf.dsmSize * define::GB);
+  memset((char *)cache.data, 0, cache.size * define::GB);
 
   initRDMAConnection();
 
-  Debug::notifyInfo("number of threads on memory node: %d", NR_DIRECTORY);
   for (int i = 0; i < NR_DIRECTORY; ++i) {
     dirAgent[i] =
         new Directory(dirCon[i], remoteInfo, conf.machineNR, i, myNodeID);
@@ -57,37 +53,57 @@ DSM::DSM(const DSMConfig &conf)
   keeper->barrier("DSM-init");
 }
 
-DSM::~DSM() {}
+DSM::~DSM() { hugePageFree((void *)baseAddr, conf.dsmSize * define::GB); }
 
 void DSM::registerThread() {
-
-  static bool has_init[MAX_APP_THREAD];
 
   if (thread_id != -1)
     return;
 
   thread_id = appID.fetch_add(1);
   thread_tag = thread_id + (((uint64_t)this->getMyNodeID()) << 32) + 1;
-
   iCon = thCon[thread_id];
 
-  if (!has_init[thread_id]) {
-    iCon->message->initRecv();
-    iCon->message->initSend();
-
-    has_init[thread_id] = true;
-  }
-
-  rdma_buffer = (char *)cache.data + thread_id * 12 * define::MB;
+  iCon->message->initRecv();
+  iCon->message->initSend();
+  rdma_buffer = (char *)cache.data + thread_id * define::kPerThreadRdmaBuf;
 
   for (int i = 0; i < define::kMaxCoro; ++i) {
     rbuf[i].set_buffer(rdma_buffer + i * define::kPerCoroRdmaBuf);
   }
 }
 
+void DSM::loadKeySpace(const std::string& load_workloads_path, bool is_str) {
+  keySpaceSize = 0;
+  std::string op, line, str_k;
+  int int_k;
+  std::ifstream load_in(load_workloads_path);
+  Debug::notifyInfo("Loading key space...");
+  while (std::getline(load_in, line)) {
+    if (!line.size()) continue;
+    std::istringstream tmp(line);
+    tmp >> op;
+    assert(op == "INSERT");
+    if(is_str) {
+      tmp >> str_k;
+      keyBuffer[keySpaceSize ++] = str2key(str_k);
+    }
+    else {
+      tmp >> int_k;
+      keyBuffer[keySpaceSize ++] = int2key(int_k);
+    }
+  }
+  Debug::notifyInfo("Key space load done.");
+}
+
+Key DSM::getRandomKey() {
+  uint32_t seed = asm_rdtsc();
+  return keyBuffer[rand_r(&seed) % keySpaceSize];
+}
+
 void DSM::initRDMAConnection() {
 
-  Debug::notifyInfo("number of servers (colocated MN/CN): %d", conf.machineNR);
+  Debug::notifyInfo("Machine NR: %d", conf.machineNR);
 
   remoteInfo = new RemoteConnection[conf.machineNR];
 
@@ -506,11 +522,11 @@ void DSM::faa_dm_boundary_sync(GlobalAddress gaddr, uint64_t add_val,
   }
 }
 
-uint64_t DSM::poll_rdma_cq(int count) {
+int DSM::poll_rdma_cq(int count) {
   ibv_wc wc;
-  pollWithCQ(iCon->cq, count, &wc);
+  int res = pollWithCQ(iCon->cq, count, &wc);
 
-  return wc.wr_id;
+  return res;
 }
 
 bool DSM::poll_rdma_cq_once(uint64_t &wr_id) {

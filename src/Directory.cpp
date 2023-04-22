@@ -3,6 +3,8 @@
 
 #include "Connection.h"
 
+// #include <gperftools/profiler.h>
+
 GlobalAddress g_root_ptr = GlobalAddress::Null();
 int g_root_level = -1;
 bool enable_cache;
@@ -27,8 +29,8 @@ Directory::~Directory() { delete chunckAlloc; }
 
 void Directory::dirThread() {
 
-  bindCore(23 - dirID);
-  Debug::notifyInfo("thread %d in memory nodes runs...\n", dirID);
+  bindCore((CPU_PHYSICAL_CORE_NUM - 1 - dirID) * 2 + 1);  // bind to the last CPU core
+  Debug::notifyInfo("dir %d launch!\n", dirID);
 
   while (true) {
     struct ibv_wc wc;
@@ -74,9 +76,11 @@ void Directory::process_message(const RawMessage *m) {
     if (g_root_level < m->level) {
       g_root_ptr = m->addr;
       g_root_level = m->level;
+#ifdef TREE_ENABLE_CACHE
       if (g_root_level >= 3) {
         enable_cache = true;
       }
+#endif
     }
 
     break;

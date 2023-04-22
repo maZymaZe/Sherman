@@ -25,7 +25,7 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
 
   for (int i = 0; i < devicesNum; ++i) {
     // printf("Device %d: %s\n", i, ibv_get_device_name(deviceList[i]));
-    if (ibv_get_device_name(deviceList[i])[5] == '0') {
+    if (ibv_get_device_name(deviceList[i])[5] == IB_DEV_NAME_IDX) {
       devIndex = i;
       break;
     }
@@ -79,7 +79,9 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
 
   // check device memory support
   if (kMaxDeviceMemorySize == 0) {
+#ifndef CONFIG_ENABLE_EMBEDDING_LOCK
     checkDMSupported(ctx);
+#endif
   }
 
   return true;
@@ -197,7 +199,7 @@ bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *send_cq,
   if (mode == IBV_QPT_RC) {
     attr.comp_mask = IBV_EXP_QP_INIT_ATTR_CREATE_FLAGS |
                      IBV_EXP_QP_INIT_ATTR_PD | IBV_EXP_QP_INIT_ATTR_ATOMICS_ARG;
-    attr.max_atomic_arg = 32;
+    attr.max_atomic_arg = 32;  // [CONFIG]
   } else {
     attr.comp_mask = IBV_EXP_QP_INIT_ATTR_PD;
   }
@@ -247,7 +249,7 @@ bool createDCTarget(ibv_exp_dct **dct, ibv_cq *cq, RdmaContext *context,
   dAttr.min_rnr_timer = 2;
   dAttr.tclass = 0;
   dAttr.flow_label = 0;
-  dAttr.mtu = IBV_MTU_4096;
+  dAttr.mtu = IBV_MTU_4096;  //  [CONFIG]
   dAttr.pkey_index = 0;
   dAttr.hop_limit = 1;
   dAttr.create_flags = 0;

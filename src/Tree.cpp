@@ -9,20 +9,43 @@
 #include <queue>
 #include <utility>
 #include <vector>
+// #include <mutex>
 
+// std::mutex cout_lock;
 bool enter_debug = false;
 
-uint64_t cache_miss[MAX_APP_THREAD][8];
-uint64_t cache_hit[MAX_APP_THREAD][8];
-uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
+uint64_t cache_miss[MAX_APP_THREAD];
+uint64_t cache_hit[MAX_APP_THREAD];
+uint64_t lock_fail[MAX_APP_THREAD];
+uint64_t try_lock[MAX_APP_THREAD];
+uint64_t try_write_op[MAX_APP_THREAD];
+uint64_t read_retry[MAX_APP_THREAD];
+uint64_t try_read[MAX_APP_THREAD];
+uint64_t pattern[MAX_APP_THREAD][8];
+uint64_t hierarchy_lock[MAX_APP_THREAD][8];
+uint64_t handover_count[MAX_APP_THREAD][8];
+uint64_t hot_filter_count[MAX_APP_THREAD][8];
+uint64_t latency[MAX_APP_THREAD][MAX_CORO_NUM][LATENCY_WINDOWS];
+volatile bool need_stop = false;
 
 thread_local CoroCall Tree::worker[define::kMaxCoro];
 thread_local CoroCall Tree::master;
 thread_local GlobalAddress path_stack[define::kMaxCoro]
                                      [define::kMaxLevelOfTree];
 
+// for coroutine schedule
+struct CoroDeadline {
+  uint64_t deadline;
+  uint16_t coro_id;
+
+  bool operator<(const CoroDeadline &o) const {
+    return this->deadline < o.deadline;
+  }
+};
+
 thread_local Timer timer;
 thread_local std::queue<uint16_t> hot_wait_queue;
+thread_local std::priority_queue<CoroDeadline> deadline_queue;
 
 Tree::Tree(DSM *dsm, uint16_t tree_id) : dsm(dsm), tree_id(tree_id) {
 
@@ -39,7 +62,7 @@ Tree::Tree(DSM *dsm, uint16_t tree_id) : dsm(dsm), tree_id(tree_id) {
   assert(dsm->is_register());
   print_verbose();
 
-  index_cache = new IndexCache(define::kIndexCacheSize);
+  index_cache = new IndexCache(define::kIndexCacheSize, dsm);
 
   root_ptr_ptr = get_root_ptr_ptr();
 
@@ -64,9 +87,7 @@ void Tree::print_verbose() {
 
   int kLeafHdrOffset = STRUCT_OFFSET(LeafPage, hdr);
   int kInternalHdrOffset = STRUCT_OFFSET(InternalPage, hdr);
-  if (kLeafHdrOffset != kInternalHdrOffset) {
-    std::cerr << "format error" << std::endl;
-  }
+  assert(kLeafHdrOffset == kInternalHdrOffset);
 
   if (dsm->getMyNodeID() == 0) {
     std::cout << "Header size: " << sizeof(Header) << std::endl;
@@ -204,6 +225,7 @@ next:
 
 inline bool Tree::try_lock_addr(GlobalAddress lock_addr, uint64_t tag,
                                 uint64_t *buf, CoroContext *cxt, int coro_id) {
+  auto &pattern_cnt = pattern[dsm->getMyThreadID()][lock_addr.nodeID];
 
   bool hand_over = acquire_local_lock(lock_addr, cxt, coro_id);
   if (hand_over) {
@@ -215,6 +237,7 @@ inline bool Tree::try_lock_addr(GlobalAddress lock_addr, uint64_t tag,
     uint64_t retry_cnt = 0;
     uint64_t pre_tag = 0;
     uint64_t conflict_tag = 0;
+    try_lock[dsm->getMyThreadID()]++;
   retry:
     retry_cnt++;
     if (retry_cnt > 1000000) {
@@ -226,14 +249,20 @@ inline bool Tree::try_lock_addr(GlobalAddress lock_addr, uint64_t tag,
       assert(false);
     }
 
+#ifdef CONFIG_ENABLE_EMBEDDING_LOCK
+    bool res = dsm->cas_sync(lock_addr, 0, tag, buf, cxt);
+#else
     bool res = dsm->cas_dm_sync(lock_addr, 0, tag, buf, cxt);
+#endif
 
+    pattern_cnt++;
     if (!res) {
       conflict_tag = *buf - 1;
       if (conflict_tag != pre_tag) {
         retry_cnt = 0;
         pre_tag = conflict_tag;
       }
+      lock_fail[dsm->getMyThreadID()]++;
       goto retry;
     }
   }
@@ -254,11 +283,19 @@ inline void Tree::unlock_addr(GlobalAddress lock_addr, uint64_t tag,
   auto cas_buf = dsm->get_rbuf(coro_id).get_cas_buffer();
 
   *cas_buf = 0;
+#ifdef CONFIG_ENABLE_EMBEDDING_LOCK
+  if (async) {
+    dsm->write((char *)cas_buf, lock_addr, sizeof(uint64_t), false);
+  } else {
+    dsm->write_sync((char *)cas_buf, lock_addr, sizeof(uint64_t), cxt);
+  }
+#else
   if (async) {
     dsm->write_dm((char *)cas_buf, lock_addr, sizeof(uint64_t), false);
   } else {
     dsm->write_dm_sync((char *)cas_buf, lock_addr, sizeof(uint64_t), cxt);
   }
+#endif
 
   releases_local_lock(lock_addr);
 }
@@ -281,11 +318,17 @@ void Tree::write_page_and_unlock(char *page_buffer, GlobalAddress page_addr,
   rs[0].size = page_size;
   rs[0].is_on_chip = false;
 
-  rs[1].source = (uint64_t)dsm->get_rbuf(coro_id).get_cas_buffer();
+  auto cas_buf = dsm->get_rbuf(coro_id).get_cas_buffer();
+  *cas_buf = 0;
+  rs[1].source = (uint64_t)cas_buf;  // [DEBUG]
   rs[1].dest = lock_addr;
   rs[1].size = sizeof(uint64_t);
 
+#ifdef CONFIG_ENABLE_EMBEDDING_LOCK
+  rs[1].is_on_chip = false;
+#else
   rs[1].is_on_chip = true;
+#endif
 
   *(uint64_t *)rs[1].source = 0;
   if (async) {
@@ -305,6 +348,7 @@ void Tree::lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
   try_lock_addr(lock_addr, tag, cas_buffer, cxt, coro_id);
 
   dsm->read_sync(page_buffer, page_addr, page_size, cxt);
+  pattern[dsm->getMyThreadID()][page_addr.nodeID]++;
 }
 
 void Tree::lock_bench(const Key &k, CoroContext *cxt, int coro_id) {
@@ -327,12 +371,13 @@ void Tree::insert_internal(const Key &k, GlobalAddress v, CoroContext *cxt,
 
   GlobalAddress p = root;
 
+  try_read[dsm->getMyThreadID()] ++;
 next:
 
-  if (!page_search(p, k, result, cxt, coro_id)) {
-    std::cout << "SEARCH WARNING insert" << std::endl;
+  if (!page_search(p, k, result, cxt, coro_id) || result.level == 0) {
+    // std::cout << "SEARCH WARNING insert" << std::endl;
     p = get_root_ptr(cxt, coro_id);
-    sleep(1);
+    // sleep(1);
     goto next;
   }
 
@@ -350,39 +395,40 @@ next:
   internal_page_store(p, k, v, root, level, cxt, coro_id);
 }
 
+
 void Tree::insert(const Key &k, const Value &v, CoroContext *cxt, int coro_id) {
   assert(dsm->is_register());
 
   before_operation(cxt, coro_id);
+  try_write_op[dsm->getMyThreadID()]++;
 
   if (enable_cache) {
     GlobalAddress cache_addr;
-    auto entry = index_cache->search_from_cache(k, &cache_addr,
-                                                dsm->getMyThreadID() == 0);
+    auto entry = index_cache->search_from_cache(k, &cache_addr);
     if (entry) { // cache hit
       auto root = get_root_ptr(cxt, coro_id);
       if (leaf_page_store(cache_addr, k, v, root, 0, cxt, coro_id, true)) {
 
-        cache_hit[dsm->getMyThreadID()][0]++;
+        cache_hit[dsm->getMyThreadID()]++;
         return;
       }
       // cache stale, from root,
       index_cache->invalidate(entry);
     }
-    cache_miss[dsm->getMyThreadID()][0]++;
+    cache_miss[dsm->getMyThreadID()]++;
   }
 
   auto root = get_root_ptr(cxt, coro_id);
   SearchResult result;
 
   GlobalAddress p = root;
+  try_read[dsm->getMyThreadID()] ++;
 
 next:
-
   if (!page_search(p, k, result, cxt, coro_id)) {
-    std::cout << "SEARCH WARNING insert" << std::endl;
+    // std::cout << "SEARCH WARNING insert" << std::endl;
     p = get_root_ptr(cxt, coro_id);
-    sleep(1);
+    // sleep(1);
     goto next;
   }
 
@@ -394,13 +440,14 @@ next:
     }
 
     p = result.next_level;
-    if (result.level != 1) {
+    if (result.level != 1) {  // 不是倒数第二层
       goto next;
     }
   }
 
-  leaf_page_store(p, k, v, root, 0, cxt, coro_id);
+  leaf_page_store(p, k, v, root, 0, cxt, coro_id, false);
 }
+
 
 bool Tree::search(const Key &k, Value &v, CoroContext *cxt, int coro_id) {
   assert(dsm->is_register());
@@ -414,30 +461,36 @@ bool Tree::search(const Key &k, Value &v, CoroContext *cxt, int coro_id) {
   const CacheEntry *entry = nullptr;
   if (enable_cache) {
     GlobalAddress cache_addr;
-    entry = index_cache->search_from_cache(k, &cache_addr,
-                                           dsm->getMyThreadID() == 0);
+    // uint64_t st, et, diff;
+    // st = rdtsc();
+    entry = index_cache->search_from_cache(k, &cache_addr);
+    // et = rdtsc();
     if (entry) { // cache hit
-      cache_hit[dsm->getMyThreadID()][0]++;
+      cache_hit[dsm->getMyThreadID()]++;
       from_cache = true;
       p = cache_addr;
-
+      // diff = et -st;
+      // cout_lock.lock();
+      // std::cout << "search_cache_lat=" << diff << std::endl;
+      // cout_lock.unlock();
     } else {
-      cache_miss[dsm->getMyThreadID()][0]++;
+      cache_miss[dsm->getMyThreadID()]++;
     }
   }
+  try_read[dsm->getMyThreadID()] ++;
 
 next:
   if (!page_search(p, k, result, cxt, coro_id, from_cache)) {
     if (from_cache) { // cache stale
       index_cache->invalidate(entry);
-      cache_hit[dsm->getMyThreadID()][0]--;
-      cache_miss[dsm->getMyThreadID()][0]++;
+      cache_hit[dsm->getMyThreadID()]--;
+      cache_miss[dsm->getMyThreadID()]++;
       from_cache = false;
 
       p = root;
     } else {
-      std::cout << "SEARCH WARNING search" << std::endl;
-      sleep(1);
+      // std::cout << "SEARCH WARNING search" << std::endl;
+      // sleep(1);
     }
     goto next;
   }
@@ -458,43 +511,195 @@ next:
   }
 }
 
-uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
+bool Tree::level_one_page_search(const Key &k, TmpResult* t_res, CoroContext *cxt, int coro_id) {
+  auto root = get_root_ptr(cxt, coro_id);
+
+  GlobalAddress p = root;
+  SearchResult result;
+  try_read[dsm->getMyThreadID()] ++;
+
+next:
+  t_res->is_leaf = false;
+  t_res->level = 0;
+  if (!page_search(p, k, result, cxt, coro_id, false, t_res)) {
+    return false;
+  }
+  if (result.slibing != GlobalAddress::Null()) {
+    p = result.slibing;
+    goto next;
+  }
+  if (result.level <= 1) {
+    return true;
+  }
+  else {  // internal
+    p = result.next_level;
+    goto next;
+  }
+}
+
+
+/*
+  range query, DO NOT support corotine currently
+*/
+// void Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret) {
+
+//   const int kParaFetch = 16;
+//   thread_local std::vector<InternalPage> result;
+//   thread_local std::vector<GlobalAddress> leaves;
+//   thread_local TmpResult tmp_res;
+
+//   result.clear();
+//   leaves.clear();
+
+//   index_cache->search_range_from_cache(from, to, result);  // 读取被cache住的倒数第二层node
+//   cache_hit[dsm->getMyThreadID()] += result.size() * spanSize;
+//   int cnt = 0;
+//   auto tmp = from;
+//   while(tmp < to) cnt ++, tmp = tmp + 1;
+//   cache_miss[dsm->getMyThreadID()] += cnt - result.size() * spanSize;
+
+//   std::sort(result.begin(), result.end(), [](const InternalPage& a, const InternalPage& b){
+//     return std::make_pair(a.hdr.lowest, a.hdr.highest) < std::make_pair(b.hdr.lowest, b.hdr.highest);
+//   });
+
+//   // 如果没有一个被cache住就search一个from的那个page
+//   if (result.empty() || from < result[0].hdr.lowest) {
+//     if(level_one_page_search(from, &tmp_res, nullptr, 0)
+//        && tmp_res.level == 1)
+//       result.insert(result.begin(), tmp_res.tmp_page);
+//   }
+//   // 根据lowest和highest补充读取result
+//   for (auto iter = result.begin(); iter != result.end();) {
+//     auto pa_hdr = iter->hdr;
+//     if (++iter == result.end()) break;
+//     auto pb_hdr = iter->hdr;
+//     if (pa_hdr.highest < pb_hdr.lowest) {
+//       if (level_one_page_search(pa_hdr.highest, &tmp_res, nullptr, 0)
+//           && tmp_res.level == 1)
+//         iter = result.insert(iter, tmp_res.tmp_page);
+//     }
+//   }
+//   // 根据to补充slibing result
+//   while (!result.empty() && result.back().hdr.highest < to) {
+//     if (result.back().hdr.sibling_ptr == GlobalAddress::Null()) break;
+//     if (level_one_page_search(result.back().hdr.highest, &tmp_res, nullptr, 0)
+//         && tmp_res.level == 1)
+//       result.push_back(tmp_res.tmp_page);
+//     else break;
+//   }
+
+//   auto check_addr = [](const GlobalAddress& addr){  // TODO: fix corotine bug
+//     return addr.nodeID < 16 && addr.offset < 64ull * define::GB;
+//   };
+
+//   for (auto& page : result) {
+//     auto cnt = page.hdr.last_index + 1;
+//     auto addr = page.hdr.leftmost_ptr;
+
+//     // [from, to]
+//     // [lowest, page->records[0].key);
+//     bool no_fetch = from > page.records[0].key || to < page.hdr.lowest;
+//     if (!no_fetch && check_addr(addr)) {
+//       leaves.push_back(addr);
+//     }
+//     for (int i = 1; i < cnt; ++i) {
+//       no_fetch = from > page.records[i].key || to < page.records[i - 1].key;
+//       if (!no_fetch && check_addr(page.records[i - 1].ptr)) {
+//         leaves.push_back(page.records[i - 1].ptr);
+//       }
+//     }
+
+//     no_fetch = from > page.hdr.highest || to < page.records[cnt - 1].key;
+//     if (!no_fetch && check_addr(page.records[cnt - 1].ptr)) {
+//       leaves.push_back(page.records[cnt - 1].ptr);
+//     }
+//   }
+
+//   // printf("---- %d ----\n", leaves.size());
+//   // sleep(1);
+
+//   // 并发读取所有leaf pages
+//   int cq_cnt = 0;
+//   char *range_buffer = (dsm->get_rbuf(0)).get_range_buffer();
+
+//   for (size_t i = 0; i < leaves.size(); ++i) {
+//     if (i > 0 && i % kParaFetch == 0) {
+//       cq_cnt -= dsm->poll_rdma_cq(kParaFetch);
+//       // cq_cnt -= kParaFetch;
+//       for (int k = 0; k < kParaFetch; ++k) {
+//         auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
+//         for (int i = 0; i < kLeafCardinality; ++i) {
+//           auto &r = page->records[i];
+//           if (r.value != kValueNull && r.f_version == r.r_version) {
+//             if (r.key >= from && r.key <= to) {
+//               ret[r.key] = r.value;
+//             }
+//           }
+//         }
+//       }
+//     }
+//     dsm->read(range_buffer + kLeafPageSize * (i % kParaFetch), leaves[i],
+//               sizeof(LeafPage), true, nullptr);  // poll cq in this batch instead of at master corotine
+//     cq_cnt++;
+//   }
+
+//   // 从leaf pages中挑出范围内的kv
+//   if (cq_cnt != 0) {
+//     dsm->poll_rdma_cq(cq_cnt);
+//     for (int k = 0; k < cq_cnt; ++k) {
+//       auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
+//       for (int i = 0; i < kLeafCardinality; ++i) {
+//         auto &r = page->records[i];
+//         if (r.value != kValueNull && r.f_version == r.r_version) {
+//           if (r.key >= from && r.key <= to) {
+//             ret[r.key] = r.value;
+//           }
+//         }
+//       }
+//     }
+//   }
+//   return;
+// }
+
+uint64_t Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret,
                            CoroContext *cxt, int coro_id) {
 
   const int kParaFetch = 32;
-  thread_local std::vector<InternalPage *> result;
+  thread_local std::vector<InternalPage> result;
   thread_local std::vector<GlobalAddress> leaves;
 
   result.clear();
   leaves.clear();
   index_cache->search_range_from_cache(from, to, result);
-  
+
   // FIXME: here, we assume all innernal nodes are cached in compute node
   if (result.empty()) {
+    for(auto k = from; k < to; k = k + spanSize) search(k, ret[k], cxt, coro_id);  // load into cache
+    printf("loading cache...");
     return 0;
   }
 
   uint64_t counter = 0;
   for (auto page : result) {
-    auto cnt = page->hdr.last_index + 1;
-    auto addr = page->hdr.leftmost_ptr;
+    auto cnt = page.hdr.last_index + 1;
+    auto addr = page.hdr.leftmost_ptr;
 
     // [from, to]
-    // [lowest, page->records[0].key);
-    bool no_fetch = from > page->records[0].key || to < page->hdr.lowest;
+    // [lowest, page.records[0].key);
+    bool no_fetch = from > page.records[0].key || to < page.hdr.lowest;
     if (!no_fetch) {
       leaves.push_back(addr);
     }
     for (int i = 1; i < cnt; ++i) {
-      no_fetch = from > page->records[i].key || to < page->records[i - 1].key;
+      no_fetch = from > page.records[i].key || to < page.records[i - 1].key;
       if (!no_fetch) {
-        leaves.push_back(page->records[i - 1].ptr);
+        leaves.push_back(page.records[i - 1].ptr);
       }
     }
 
-    no_fetch = from > page->hdr.highest || to < page->records[cnt - 1].key;
+    no_fetch = from > page.hdr.highest || to < page.records[cnt - 1].key;
     if (!no_fetch) {
-      leaves.push_back(page->records[cnt - 1].ptr);
+      leaves.push_back(page.records[cnt - 1].ptr);
     }
   }
 
@@ -510,7 +715,8 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
           auto &r = page->records[i];
           if (r.value != kValueNull && r.f_version == r.r_version) {
             if (r.key >= from && r.key <= to) {
-              value_buffer[counter++] = r.value;
+              // value_buffer[counter++] = r.value;
+              ret[r.key] = r.value;
             }
           }
         }
@@ -529,48 +735,41 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
         auto &r = page->records[i];
         if (r.value != kValueNull && r.f_version == r.r_version) {
           if (r.key >= from && r.key <= to) {
-            value_buffer[counter++] = r.value;
+            // value_buffer[counter++] = r.value;
+            ret[r.key] = r.value;
           }
         }
       }
     }
   }
 
+  for(auto k = from; k < to; k = k + 1) {
+    if (ret.find(k) != ret.end()) {
+      cache_hit[dsm->getMyThreadID()]++;
+    }
+    else {
+      cache_miss[dsm->getMyThreadID()]++;
+      search(k, ret[k], cxt, coro_id);
+    }
+  }
+
   return counter;
 }
 
+// Del needs to be rewritten
 void Tree::del(const Key &k, CoroContext *cxt, int coro_id) {
   assert(dsm->is_register());
-
   before_operation(cxt, coro_id);
-
-  if (enable_cache) {
-    GlobalAddress cache_addr;
-    auto entry = index_cache->search_from_cache(k, &cache_addr,
-                                                dsm->getMyThreadID() == 0);
-    if (entry) { // cache hit
-      if (leaf_page_del(cache_addr, k, 0, cxt, coro_id, true)) {
-
-        cache_hit[dsm->getMyThreadID()][0]++;
-        return;
-      }
-      // cache stale, from root,
-      index_cache->invalidate(entry);
-    }
-    cache_miss[dsm->getMyThreadID()][0]++;
-  }
 
   auto root = get_root_ptr(cxt, coro_id);
   SearchResult result;
 
   GlobalAddress p = root;
+  try_read[dsm->getMyThreadID()] ++;
 
 next:
-
   if (!page_search(p, k, result, cxt, coro_id)) {
-    std::cout << "SEARCH WARNING del" << std::endl;
-    p = get_root_ptr(cxt, coro_id);
-    sleep(1);
+    std::cout << "SEARCH WARNING" << std::endl;
     goto next;
   }
 
@@ -583,6 +782,7 @@ next:
 
     p = result.next_level;
     if (result.level != 1) {
+
       goto next;
     }
   }
@@ -592,57 +792,74 @@ next:
 
 bool Tree::page_search(GlobalAddress page_addr, const Key &k,
                        SearchResult &result, CoroContext *cxt, int coro_id,
-                       bool from_cache) {
+                       bool from_cache, TmpResult* t_res) {
   auto page_buffer = (dsm->get_rbuf(coro_id)).get_page_buffer();
+  assert(STRUCT_OFFSET(LeafPage, hdr) == STRUCT_OFFSET(InternalPage, hdr));
   auto header = (Header *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
+  auto &pattern_cnt = pattern[dsm->getMyThreadID()][page_addr.nodeID];
 
   int counter = 0;
 re_read:
+  read_retry[dsm->getMyThreadID()] ++;
   if (++counter > 100) {
     printf("re read too many times\n");
     sleep(1);
   }
-  dsm->read_sync(page_buffer, page_addr, kLeafPageSize, cxt);
+  dsm->read_sync(page_buffer, page_addr, std::max(kLeafPageSize, kInternalPageSize), cxt);
+  pattern_cnt++;
 
   memset(&result, 0, sizeof(result));
   result.is_leaf = header->leftmost_ptr == GlobalAddress::Null();
   result.level = header->level;
   path_stack[coro_id][result.level] = page_addr;
-  // std::cout << "level " << (int)result.level << " " << page_addr <<
-  // std::endl;
 
   if (result.is_leaf) {
     auto page = (LeafPage *)page_buffer;
     if (!page->check_consistent()) {
       goto re_read;
     }
+    // if(t_res) {
+    //   t_res->is_leaf = true;
+    //   t_res->tmp_leaf = *page;
+    // }
 
     if (from_cache &&
         (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
       return false;
     }
 
-    assert(result.level == 0);
+    // assert(result.level == 0);  // BUG
+    if (result.level != 0) {
+      return false;
+    }
     if (k >= page->hdr.highest) { // should turn right
       result.slibing = page->hdr.sibling_ptr;
       return true;
     }
     if (k < page->hdr.lowest) {
-      assert(false);
+      // assert(false);
       return false;
     }
     leaf_page_search(page, k, result);
   } else {
-    assert(result.level != 0);
-    assert(!from_cache);
     auto page = (InternalPage *)page_buffer;
-
     if (!page->check_consistent()) {
       goto re_read;
     }
+    if (result.level == 0) return false;
+    assert(!from_cache);
+
+    if(t_res && result.level) {
+      t_res->level = result.level;
+      t_res->tmp_page = *page;
+    }
 
     if (result.level == 1 && enable_cache) {
-      index_cache->add_to_cache(page);
+      index_cache->add_to_cache(page);  // 存放倒数第二层的到cache中
+      // if (enter_debug) {
+      //   printf("add %lud [%lud %lud]\n", k, page->hdr.lowest,
+      //          page->hdr.highest);
+      // }
     }
 
     if (k >= page->hdr.highest) { // should turn right
@@ -650,10 +867,10 @@ re_read:
       return true;
     }
     if (k < page->hdr.lowest) {
-      printf("key %ld error in level %d\n", k, page->hdr.level);
-      sleep(10);
-      print_and_check_tree();
-      assert(false);
+      // printf("key %ld error in level %d\n", k, page->hdr.level);
+      // sleep(10);
+      // print_and_check_tree();
+      // assert(false);
       return false;
     }
     internal_page_search(page, k, result);
@@ -666,6 +883,10 @@ void Tree::internal_page_search(InternalPage *page, const Key &k,
                                 SearchResult &result) {
 
   assert(k >= page->hdr.lowest);
+  if (k >= page->hdr.highest) { // should turn right  // BUG: 很可能是这里导致的cache启动失败
+    result.slibing = page->hdr.sibling_ptr;
+    return;
+  }
   assert(k < page->hdr.highest);
 
   auto cnt = page->hdr.last_index + 1;
@@ -703,8 +924,13 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
       CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
 
   GlobalAddress lock_addr;
+
+#ifdef CONFIG_ENABLE_EMBEDDING_LOCK
+  lock_addr = page_addr;
+#else
   lock_addr.nodeID = page_addr.nodeID;
   lock_addr.offset = lock_index * sizeof(uint64_t);
+#endif
 
   auto &rbuf = dsm->get_rbuf(coro_id);
   uint64_t *cas_buffer = rbuf.get_cas_buffer();
@@ -813,6 +1039,10 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
                         cxt, coro_id)) {
       return;
     }
+    else {
+      insert_internal(split_key, sibling_addr, cxt, coro_id, level + 1);
+      return;
+    }
   }
 
   auto up_level = path_stack[coro_id][level + 1];
@@ -830,7 +1060,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
                            CoroContext *cxt, int coro_id, bool from_cache) {
 
   uint64_t lock_index =
-      CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
+      CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;  // 可能是这里造成的死锁
 
   GlobalAddress lock_addr;
 
@@ -859,15 +1089,30 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   if (from_cache &&
       (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
     this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
+
+    // if (enter_debug) {
+    //   printf("cache {%lu} %lu [%lu %lu]\n", page_addr.val, k,
+    //   page->hdr.lowest,
+    //          page->hdr.highest);
+    // }
+
     return false;
   }
+
+  // if (enter_debug) {
+  //   printf("{%lu} %lu [%lu %lu]\n", page_addr.val, k, page->hdr.lowest,
+  //          page->hdr.highest);
+  // }
 
   if (k >= page->hdr.highest) {
 
     this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
+
     assert(page->hdr.sibling_ptr != GlobalAddress::Null());
+
     this->leaf_page_store(page->hdr.sibling_ptr, k, v, root, level, cxt,
-                          coro_id);
+                          coro_id, false);
+
     return true;
   }
   assert(k >= page->hdr.lowest);
@@ -925,6 +1170,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
         [](const LeafEntry &a, const LeafEntry &b) { return a.key < b.key; });
   }
 
+
   Key split_key;
   GlobalAddress sibling_addr;
   if (need_split) { // need split
@@ -944,7 +1190,8 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
     for (int i = m; i < cnt; ++i) { // move
       sibling->records[i - m].key = page->records[i].key;
       sibling->records[i - m].value = page->records[i].value;
-      page->records[i].key = 0;
+      // page->records[i].key = 0;
+      std::fill(page->records[i].key.begin(), page->records[i].key.end(), 0);
       page->records[i].value = kValueNull;
     }
     page->hdr.last_index -= (cnt - m);
@@ -975,6 +1222,10 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
                         cxt, coro_id)) {
       return true;
     }
+    else {
+      insert_internal(split_key, sibling_addr, cxt, coro_id, level + 1);  // BUG: 理论上不可能在root的分裂上有冲突吧?
+      return true;
+    }
   }
 
   auto up_level = path_stack[coro_id][level + 1];
@@ -983,15 +1234,16 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
     internal_page_store(up_level, split_key, sibling_addr, root, level + 1, cxt,
                         coro_id);
   } else {
-    assert(from_cache);
+    // assert(from_cache);
     insert_internal(split_key, sibling_addr, cxt, coro_id, level + 1);
   }
 
   return true;
 }
 
-bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
-                         CoroContext *cxt, int coro_id, bool from_cache) {
+// Need BIG FIX
+void Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
+                         CoroContext *cxt, int coro_id) {
   uint64_t lock_index =
       CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
 
@@ -1004,66 +1256,56 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
   lock_addr.offset = lock_index * sizeof(uint64_t);
 #endif
 
-  auto &rbuf = dsm->get_rbuf(coro_id);
-  uint64_t *cas_buffer = rbuf.get_cas_buffer();
-  auto page_buffer = rbuf.get_page_buffer();
+  uint64_t *cas_buffer = dsm->get_rbuf(coro_id).get_cas_buffer();
 
   auto tag = dsm->getThreadTag();
-  assert(tag != 0);
+  try_lock_addr(lock_addr, tag, cas_buffer, cxt, coro_id);
 
-  lock_and_read_page(page_buffer, page_addr, kLeafPageSize, cas_buffer,
-                     lock_addr, tag, cxt, coro_id);
-
+  auto page_buffer = dsm->get_rbuf(coro_id).get_page_buffer();
+  dsm->read_sync(page_buffer, page_addr, kLeafPageSize, cxt);
   auto page = (LeafPage *)page_buffer;
 
   assert(page->hdr.level == level);
   assert(page->check_consistent());
-
-  if (from_cache &&
-      (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
-    this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
-    return false;
-  }
-
   if (k >= page->hdr.highest) {
     this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
+
     assert(page->hdr.sibling_ptr != GlobalAddress::Null());
+
     this->leaf_page_del(page->hdr.sibling_ptr, k, level, cxt, coro_id);
-    return true;
   }
 
-  assert(k >= page->hdr.lowest);
+  auto cnt = page->hdr.last_index + 1;
 
-  char *update_addr = nullptr;
-  for (int i = 0; i < kLeafCardinality; ++i) {
-    auto &r = page->records[i];
-    if (r.key == k && r.value != kValueNull) {
-      r.value = kValueNull;
-      r.f_version++;
-      r.r_version = r.f_version;
-      update_addr = (char *)&r;
+  int del_index = -1;
+  for (int i = 0; i < cnt; ++i) {
+    if (page->records[i].key == k) { // find and update
+      del_index = i;
       break;
     }
   }
 
-  if (update_addr) {
-    write_page_and_unlock(
-        update_addr, GADD(page_addr, (update_addr - (char *)page)),
-        sizeof(LeafEntry), cas_buffer, lock_addr, tag, cxt, coro_id, false);
-  } else {
-    this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, false);
+  if (del_index != -1) { // remove and shift
+    for (int i = del_index + 1; i < cnt; ++i) {
+      page->records[i - 1].key = page->records[i].key;
+      page->records[i - 1].value = page->records[i].value;
+    }
+
+    page->hdr.last_index--;
+
+    page->set_consistent();
+    dsm->write_sync(page_buffer, page_addr, kLeafPageSize, cxt);
   }
-  return true;
+  this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, false);
 }
 
-void Tree::run_coroutine(CoroFunc func, int id, int coro_cnt) {
-
+void Tree::run_coroutine(GenFunc gen_func, WorkFunc work_func, int coro_cnt, Request* req, int req_num) {
   using namespace std::placeholders;
 
-  assert(coro_cnt <= define::kMaxCoro);
+  assert(coro_cnt <= MAX_CORO_NUM);
   for (int i = 0; i < coro_cnt; ++i) {
-    auto gen = func(i, dsm, id);
-    worker[i] = CoroCall(std::bind(&Tree::coro_worker, this, _1, gen, i));
+    RequstGen *gen = gen_func(dsm, req, req_num, i, coro_cnt);
+    worker[i] = CoroCall(std::bind(&Tree::coro_worker, this, _1, gen, work_func, i));
   }
 
   master = CoroCall(std::bind(&Tree::coro_master, this, _1, coro_cnt));
@@ -1071,7 +1313,8 @@ void Tree::run_coroutine(CoroFunc func, int id, int coro_cnt) {
   master();
 }
 
-void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id) {
+
+void Tree::coro_worker(CoroYield &yield, RequstGen *gen, WorkFunc work_func, int coro_id) {
   CoroContext ctx;
   ctx.coro_id = coro_id;
   ctx.master = &master;
@@ -1080,22 +1323,18 @@ void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id) {
   Timer coro_timer;
   auto thread_id = dsm->getMyThreadID();
 
-  while (true) {
+  while (!need_stop) {
 
     auto r = gen->next();
 
     coro_timer.begin();
-    if (r.is_search) {
-      Value v;
-      this->search(r.k, v, &ctx, coro_id);
-    } else {
-      this->insert(r.k, r.v, &ctx, coro_id);
-    }
+    work_func(this, r, &ctx, coro_id);
     auto us_10 = coro_timer.end() / 100;
+
     if (us_10 >= LATENCY_WINDOWS) {
       us_10 = LATENCY_WINDOWS - 1;
     }
-    latency[thread_id][us_10]++;
+    latency[thread_id][coro_id][us_10]++;
   }
 }
 
@@ -1105,7 +1344,7 @@ void Tree::coro_master(CoroYield &yield, int coro_cnt) {
     yield(worker[i]);
   }
 
-  while (true) {
+  while (!need_stop) {
 
     uint64_t next_coro_id;
 
@@ -1118,20 +1357,33 @@ void Tree::coro_master(CoroYield &yield, int coro_cnt) {
       hot_wait_queue.pop();
       yield(worker[next_coro_id]);
     }
+
+    if (!deadline_queue.empty()) {
+      auto now = timer.get_time_ns();
+      auto task = deadline_queue.top();
+      if (now > task.deadline) {
+        deadline_queue.pop();
+        yield(worker[task.coro_id]);
+      }
+    }
   }
 }
 
 // Local Locks
 inline bool Tree::acquire_local_lock(GlobalAddress lock_addr, CoroContext *cxt,
                                      int coro_id) {
+#ifdef CONFIG_ENABLE_LOCK_HANDOVER
   auto &node = local_locks[lock_addr.nodeID][lock_addr.offset / 8];
+  bool is_local_locked = false;
 
-  uint64_t lock_val = node.ticket_lock.fetch_add(1);
+  uint64_t lock_val = node.ticket_lock.fetch_add(1);  // 通过取值来依次排队, faa返回旧值
 
   uint32_t ticket = lock_val << 32 >> 32;
   uint32_t current = lock_val >> 32;
 
+  // printf("%ud %ud\n", ticket, current);
   while (ticket != current) { // lock failed
+    is_local_locked = true;
 
     if (cxt != nullptr) {
       hot_wait_queue.push(coro_id);
@@ -1141,13 +1393,20 @@ inline bool Tree::acquire_local_lock(GlobalAddress lock_addr, CoroContext *cxt,
     current = node.ticket_lock.load(std::memory_order_relaxed) >> 32;
   }
 
+  if (is_local_locked) {
+    hierarchy_lock[dsm->getMyThreadID()][0]++;
+  }
+
   node.hand_time++;
 
   return node.hand_over;
+#else
+  return false;
+#endif
 }
 
 inline bool Tree::can_hand_over(GlobalAddress lock_addr) {
-
+#ifdef CONFIG_ENABLE_LOCK_HANDOVER
   auto &node = local_locks[lock_addr.nodeID][lock_addr.offset / 8];
   uint64_t lock_val = node.ticket_lock.load(std::memory_order_relaxed);
 
@@ -1161,25 +1420,37 @@ inline bool Tree::can_hand_over(GlobalAddress lock_addr) {
   }
   if (!node.hand_over) {
     node.hand_time = 0;
+  } else {
+    handover_count[dsm->getMyThreadID()][0]++;
   }
 
   return node.hand_over;
+#else
+  return false;
+#endif
 }
 
 inline void Tree::releases_local_lock(GlobalAddress lock_addr) {
+#ifdef CONFIG_ENABLE_LOCK_HANDOVER
   auto &node = local_locks[lock_addr.nodeID][lock_addr.offset / 8];
 
   node.ticket_lock.fetch_add((1ull << 32));
+#endif
 }
 
-void Tree::index_cache_statistics() {
+void Tree::statistics() {
+#ifdef TREE_ENABLE_CACHE
   index_cache->statistics();
-  index_cache->bench();
+#endif
+  // index_cache->bench();
 }
 
-void Tree::clear_statistics() {
-  for (int i = 0; i < MAX_APP_THREAD; ++i) {
-    cache_hit[i][0] = 0;
-    cache_miss[i][0] = 0;
-  }
+void Tree::clear_debug_info() {
+  memset(cache_miss, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(cache_hit, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(lock_fail, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(try_lock, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(try_write_op, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(read_retry, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(try_read, 0, sizeof(uint64_t) * MAX_APP_THREAD);
 }

@@ -4,11 +4,12 @@
 #include "CacheEntry.h"
 #include "HugePageAlloc.h"
 #include "Timer.h"
-#include "WRLock.h"
 #include "third_party/inlineskiplist.h"
+#include "DSM.h"
 
-#include <atomic>
+#include <tbb/concurrent_queue.h>
 #include <queue>
+#include <atomic>
 #include <vector>
 
 extern bool enter_debug;
@@ -18,14 +19,14 @@ using CacheSkipList = InlineSkipList<CacheEntryComparator>;
 class IndexCache {
 
 public:
-  IndexCache(int cache_size);
+  IndexCache(int cache_size, DSM* dsm);
 
   bool add_to_cache(InternalPage *page);
   const CacheEntry *search_from_cache(const Key &k, GlobalAddress *addr,
                                       bool is_leader = false);
 
   void search_range_from_cache(const Key &from, const Key &to,
-                               std::vector<InternalPage *> &result);
+                               std::vector<InternalPage> &result);
 
   bool add_entry(const Key &from, const Key &to, InternalPage *ptr);
   const CacheEntry *find_entry(const Key &k);
@@ -45,7 +46,7 @@ private:
   std::atomic<int64_t> skiplist_node_cnt;
   int64_t all_page_cnt;
 
-  std::queue<std::pair<void *, uint64_t>> delay_free_list;
+  std::queue<std::pair<void *, uint64_t> > delay_free_list;
   WRLock free_lock;
 
   // SkipList
@@ -53,10 +54,15 @@ private:
   CacheEntryComparator cmp;
   Allocator alloc;
 
+  // Eviction
+  DSM *dsm;
+  // tbb::concurrent_queue<const CacheEntry *> eviction_list;
+
   void evict_one();
+  void evict();
 };
 
-inline IndexCache::IndexCache(int cache_size) : cache_size(cache_size) {
+inline IndexCache::IndexCache(int cache_size, DSM* dsm) : cache_size(cache_size), dsm(dsm) {
   skiplist = new CacheSkipList(cmp, &alloc, 21);
   uint64_t memory_size = define::MB * cache_size;
 
@@ -76,7 +82,11 @@ inline bool IndexCache::add_entry(const Key &from, const Key &to,
   e.to = to - 1; // !IMPORTANT;
   e.ptr = ptr;
 
-  return skiplist->InsertConcurrently(buf);
+  auto res = skiplist->InsertConcurrently(buf);
+  // if (res) {
+  //   eviction_list.push((const CacheEntry *)buf);
+  // }
+  return res;
 }
 
 inline const CacheEntry *IndexCache::find_entry(const Key &from,
@@ -100,6 +110,7 @@ inline const CacheEntry *IndexCache::find_entry(const Key &k) {
 }
 
 inline bool IndexCache::add_to_cache(InternalPage *page) {
+  // assert(page->hdr.level == 1);
   auto new_page = (InternalPage *)malloc(kInternalPageSize);
   memcpy(new_page, page, kInternalPageSize);
   new_page->index_cache_freq = 0;
@@ -108,35 +119,33 @@ inline bool IndexCache::add_to_cache(InternalPage *page) {
     skiplist_node_cnt.fetch_add(1);
     auto v = free_page_cnt.fetch_add(-1);
     if (v <= 0) {
-      evict_one();
+      evict();
     }
-
     return true;
   } else { // conflicted
     auto e = this->find_entry(page->hdr.lowest, page->hdr.highest);
     if (e && e->from == page->hdr.lowest && e->to == page->hdr.highest - 1) {
       auto ptr = e->ptr;
-      if (ptr == nullptr &&
-          __sync_bool_compare_and_swap(&(e->ptr), 0ull, new_page)) {
-        auto v = free_page_cnt.fetch_add(-1);
-        if (v <= 0) {
-          evict_one();
+      auto ret_val = __sync_val_compare_and_swap(&(e->ptr), ptr, new_page);
+      if (ret_val == ptr) { /// cas_success
+        if (ret_val == nullptr) {
+          auto v = free_page_cnt.fetch_add(-1);
+          if (v < 0) {
+            evict();
+          }
         }
+        // eviction_list.push(e);
         return true;
       }
     }
-
     free(new_page);
     return false;
   }
 }
 
 inline const CacheEntry *IndexCache::search_from_cache(const Key &k,
-                                                       GlobalAddress *addr,
-                                                       bool is_leader) {
-  // notice: please ensure the thread 0 can make progress
-  if (is_leader &&
-      !delay_free_list.empty()) { // try to free a page in the delay-free-list
+                                                       GlobalAddress *addr, bool is_leader) {
+  if (is_leader && !delay_free_list.empty()) { // try to free a page in the delay-free-list
     auto p = delay_free_list.front();
     if (asm_rdtsc() - p.second > 3000ull * 10) {
       free(p.first);
@@ -153,6 +162,7 @@ inline const CacheEntry *IndexCache::search_from_cache(const Key &k,
   InternalPage *page = entry ? entry->ptr : nullptr;
 
   if (page && entry->from <= k && entry->to >= k) {
+
 
     page->index_cache_freq++;
 
@@ -176,6 +186,7 @@ inline const CacheEntry *IndexCache::search_from_cache(const Key &k,
 
     compiler_barrier();
     if (entry->ptr) { // check if it is freed.
+      // printf("Cache HIt\n");
       return entry;
     }
   }
@@ -185,7 +196,7 @@ inline const CacheEntry *IndexCache::search_from_cache(const Key &k,
 
 inline void
 IndexCache::search_range_from_cache(const Key &from, const Key &to,
-                                    std::vector<InternalPage *> &result) {
+                                    std::vector<InternalPage> &result) {
   CacheSkipList::Iterator iter(skiplist);
 
   result.clear();
@@ -200,7 +211,7 @@ IndexCache::search_range_from_cache(const Key &from, const Key &to,
       if (val->from > to) {
         return;
       }
-      result.push_back(val->ptr);
+      result.push_back(*(val->ptr));
     }
     iter.Next();
   }
@@ -214,9 +225,10 @@ inline bool IndexCache::invalidate(const CacheEntry *entry) {
   }
 
   if (__sync_bool_compare_and_swap(&(entry->ptr), ptr, 0)) {
-
+    // free(ptr);
     free_lock.wLock();
     delay_free_list.push(std::make_pair(ptr, asm_rdtsc()));
+    free_page_cnt.fetch_add(1);
     free_lock.wUnlock();
     return true;
   }
@@ -224,12 +236,14 @@ inline bool IndexCache::invalidate(const CacheEntry *entry) {
   return false;
 }
 
-inline const CacheEntry *IndexCache::get_a_random_entry(uint64_t &freq) {
-  uint32_t seed = asm_rdtsc();
-  GlobalAddress tmp_addr;
+inline const CacheEntry *IndexCache::get_a_random_entry(uint64_t &freq) {  // TODO: email workload eviction
+  // CacheSkipList::Iterator iter(skiplist);
+  // uint32_t seed = asm_rdtsc();
+  // GlobalAddress tmp_addr;
 retry:
-  auto k = rand_r(&seed) % (1000ull * define::MB);
-  auto e = this->search_from_cache(k, &tmp_addr);
+  // auto e = this->search_from_cache(k, &tmp_addr);
+  auto e = this->find_entry(dsm->getRandomKey());
+
   if (!e) {
     goto retry;
   }
@@ -258,9 +272,52 @@ inline void IndexCache::evict_one() {
   }
 }
 
+inline void IndexCache::evict() {  // FIFO
+  // do {
+  //   const CacheEntry* next;
+  //   if(eviction_list.try_pop(next)) {
+  //     invalidate(next);
+  //   }
+  // } while (free_page_cnt.load() < 0 && !eviction_list.empty());
+  do {
+    evict_one();
+  } while (free_page_cnt.load() < 0);
+}
+
 inline void IndexCache::statistics() {
-  printf("[skiplist node: %ld]  [page cache: %ld]\n", skiplist_node_cnt.load(),
-         all_page_cnt - free_page_cnt.load());
+  // printf("[skiplist node: %ld]  [page cache: %ld]\n", skiplist_node_cnt.load(),
+  //        all_page_cnt - free_page_cnt.load());
+  uint64_t occupy_size = cache_size * define::MB - free_page_cnt * sizeof(InternalPage);
+  std::cout << " ----- [IndexCache]: " << " cache size=" << cache_size << " MB"
+                                       << " all_entry_cnt=" << all_page_cnt
+                                       << " free_entry_cnt=" << free_page_cnt
+                                       << " free_size=" << free_page_cnt * sizeof(InternalPage) / define::MB << " MB"
+                                       << " skiplist_node_cnt=" << skiplist_node_cnt << " ----- " << std::endl;
+  std::map<int, int64_t> cnt;
+  CacheSkipList::Iterator iter(skiplist);
+  iter.SeekToFirst();
+  uint64_t kp_cnt = 0;
+  uint64_t index_overhead = skiplist->GetHeightSum() * 8;
+  std::cout << "skiplist pointer num=" << skiplist->GetHeightSum() << std::endl;
+  while(iter.Valid()) {
+    index_overhead += sizeof(CacheEntry);
+    auto e = (const CacheEntry *)iter.key();
+    auto context = e->ptr;
+    if (context) {
+      auto level = context->hdr.level;
+      if (cnt.find(level) == cnt.end()) cnt[level] = 0;
+      cnt[level] ++;
+      kp_cnt += context->hdr.last_index;
+    }
+    iter.Next();
+  }
+  for (const auto& e : cnt) {
+    std::cout << "level=" << e.first << " cnt=" << e.second << std::endl;
+  }
+  occupy_size += index_overhead;
+  std::cout << "cache kp efficiency=" << (double)occupy_size / kp_cnt << " B" << std::endl;
+  std::cout << "leaf span=" << kLeafCardinality << std::endl;
+  std::cout << "cache efficiency=" << (double)occupy_size / kp_cnt / kLeafCardinality << " B" << std::endl;
 }
 
 inline void IndexCache::bench() {
@@ -271,7 +328,7 @@ inline void IndexCache::bench() {
 
   for (int i = 0; i < loop; ++i) {
     uint64_t r = rand() % (5 * define::MB);
-    this->find_entry(r);
+    this->find_entry(int2key(r));
   }
 
   t.end_print(loop);

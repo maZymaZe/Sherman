@@ -42,7 +42,7 @@ inline bool operator!=(const GlobalAddress &lhs, const GlobalAddress &rhs) {
 }
 
 inline std::ostream &operator<<(std::ostream &os, const GlobalAddress &obj) {
-  os << "[" << (int)obj.nodeID << ", " << obj.offset << "]";
+  os << "[" << (int)obj.nodeID << ", 0x" << std::hex << obj.offset << std::dec << "]";
   return os;
 }
 
