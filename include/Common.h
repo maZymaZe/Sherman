@@ -93,7 +93,7 @@ constexpr uint64_t GB = 1024ull * MB;
 constexpr uint16_t kCacheLineSize = 64;
 
 // for remote allocate
-constexpr uint64_t dsmSize    = 64;        // GB  [CONFIG]
+constexpr uint64_t dsmSize    = 8;        // GB  [CONFIG]
 constexpr uint64_t kChunkSize = 16 * MB;
 
 // for store root pointer
