@@ -34,7 +34,7 @@
 
 #define MAX_MACHINE 20
 #define MEMORY_NODE_NUM 1
-#define CPU_PHYSICAL_CORE_NUM 16  // [CONFIG]
+#define CPU_PHYSICAL_CORE_NUM 8  // [CONFIG]
 #define MAX_KEY_SPACE_SIZE 60000000
 // #define KEY_SPACE_LIMIT
 
@@ -51,7 +51,7 @@
 // #define STATIC_ID_FROM_IP
 
 // { app thread
-#define MAX_APP_THREAD 9    // one additional thread for data statistics(main thread)  [CONFIG]
+#define MAX_APP_THREAD 5    // one additional thread for data statistics(main thread)  [CONFIG]
 
 #define APP_MESSAGE_NR 96
 
@@ -93,7 +93,7 @@ constexpr uint64_t GB = 1024ull * MB;
 constexpr uint16_t kCacheLineSize = 64;
 
 // for remote allocate
-constexpr uint64_t dsmSize    = 64;        // GB  [CONFIG]
+constexpr uint64_t dsmSize    = 16;        // GB  [CONFIG]
 constexpr uint64_t kChunkSize = 16 * MB;
 
 // for store root pointer

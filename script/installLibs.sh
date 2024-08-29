@@ -47,12 +47,12 @@ cd ..
 # pip3 install matplotlib
 
 # tbb
-# git clone https://github.com/wjakob/tbb.git
-# cd tbb/build
-# cmake ..
-# make -j
-# sudo make install
-# cd ../..
+git clone https://github.com/wjakob/tbb.git
+cd tbb/build
+cmake ..
+make -j
+sudo make install
+cd ../..
 
 # gflag
 # git clone https://github.com/gflags/gflags.git
