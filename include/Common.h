@@ -51,7 +51,7 @@
 // #define STATIC_ID_FROM_IP
 
 // { app thread
-#define MAX_APP_THREAD 65    // one additional thread for data statistics(main thread)  [CONFIG]
+#define MAX_APP_THREAD 3    // one additional thread for data statistics(main thread)  [CONFIG]
 
 #define APP_MESSAGE_NR 96
 
@@ -113,7 +113,7 @@ constexpr uint64_t kNumOfLock = kLockChipMemSize / sizeof(uint64_t);
 constexpr uint64_t kMaxLevelOfTree = 16;
 
 constexpr uint16_t kMaxCoro = MAX_CORO_NUM;
-constexpr uint64_t rdmaBufferSize    = 4;         // GB  [CONFIG]
+constexpr uint64_t rdmaBufferSize    = 2;         // GB  [CONFIG]
 constexpr int64_t kPerThreadRdmaBuf  = rdmaBufferSize * define::GB / MAX_APP_THREAD;
 constexpr int64_t kPerCoroRdmaBuf = kPerThreadRdmaBuf / kMaxCoro;
 
