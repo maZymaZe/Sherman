@@ -8,7 +8,7 @@
 /** Implemented functions. **/
 /* Print debug title string.
    @param   str     String of debug title. */
-void Debug::debugTitle(const char *str) {
+void Debug::debugTitle(const char* str) {
     if (TITLE == true)                          /* If debug option is set. */
         printf("\033[0;45;1m%s\033[0m\n", str); /* Print debug title string. */
 }
@@ -18,7 +18,7 @@ void Debug::debugTitle(const char *str) {
                     POTENTIALPROBLEM: the length of format can not exceed
    MAX_FORMAT_LEN - 1, but there is no check.
    @param   ...     Other argument variables to print. Same as printf(). */
-void Debug::debugItem(const char *format, ...) {
+void Debug::debugItem(const char* format, ...) {
     char newFormat[MAX_FORMAT_LEN];
 
     va_list args;
@@ -34,7 +34,7 @@ void Debug::debugItem(const char *format, ...) {
     va_end(args); /* End of variable arguments. */
 }
 
-void Debug::debugCur(const char *format, ...) {
+void Debug::debugCur(const char* format, ...) {
     char newFormat[MAX_FORMAT_LEN];
 
     va_list args;
@@ -54,7 +54,7 @@ void Debug::debugCur(const char *format, ...) {
                     POTENTIALPROBLEM: the length of format can not exceed
    MAX_FORMAT_LEN - 1, but there is no check.
    @param   ...     Other argument variables to print. Same as printf(). */
-void Debug::notifyInfo(const char *format, ...) {
+void Debug::notifyInfo(const char* format, ...) {
     char newFormat[MAX_FORMAT_LEN];
 
     va_list args;
@@ -71,7 +71,7 @@ void Debug::notifyInfo(const char *format, ...) {
                     POTENTIALPROBLEM: the length of format can not exceed
    MAX_FORMAT_LEN - 1, but there is no check.
    @param   ...     Other argument variables to print. Same as printf(). */
-void Debug::notifyError(const char *format, ...) {
+void Debug::notifyError(const char* format, ...) {
     char newFormat[MAX_FORMAT_LEN];
 
     va_list args;
@@ -81,4 +81,3 @@ void Debug::notifyError(const char *format, ...) {
     vprintf(newFormat, args); /* Print string of notify information. */
     va_end(args);             /* End of variable arguments. */
 }
-

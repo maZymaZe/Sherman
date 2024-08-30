@@ -17,21 +17,21 @@
 #ifndef _ZIPF_H_
 #define _ZIPF_H_
 
+#include <assert.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <assert.h>
 // #include "util.h"
 
 struct zipf_gen_state {
-    uint64_t n;      // number of items (input)
-    double theta;    // skewness (input) in (0, 1); or, 0 = uniform, 1 = always
-                     // zero
-    double alpha;    // only depends on theta
-    double thres;    // only depends on theta
-    uint64_t last_n; // last n used to calculate the following
+    uint64_t n;       // number of items (input)
+    double theta;     // skewness (input) in (0, 1); or, 0 = uniform, 1 = always
+                      // zero
+    double alpha;     // only depends on theta
+    double thres;     // only depends on theta
+    uint64_t last_n;  // last n used to calculate the following
     double dbl_n;
     double zetan;
     double eta;
@@ -39,7 +39,7 @@ struct zipf_gen_state {
     uint64_t rand_state;
 };
 
-static double mehcached_rand_d(uint64_t *state) {
+static double mehcached_rand_d(uint64_t* state) {
     // caution: this is maybe too non-random
     *state = (*state * 0x5deece66dUL + 0xbUL) & ((1UL << 48) - 1);
     return (double)*state / (double)((1UL << 48) - 1);
@@ -54,7 +54,7 @@ static double mehcached_pow_approx(double a, double b) {
     union {
         double d;
         int x[2];
-    } u = { a };
+    } u = {a};
     u.x[1] =
         (int)((b - (double)e) * (double)(u.x[1] - 1072632447) + 1072632447.);
     u.x[0] = 0;
@@ -73,8 +73,10 @@ static double mehcached_pow_approx(double a, double b) {
     return r * u.d;
 }
 
-static void mehcached_zipf_init(struct zipf_gen_state *state, uint64_t n,
-                                double theta, uint64_t rand_seed) {
+static void mehcached_zipf_init(struct zipf_gen_state* state,
+                                uint64_t n,
+                                double theta,
+                                uint64_t rand_seed) {
     assert(n > 0);
     if (theta > 0.992 && theta < 1)
         fprintf(stderr,
@@ -94,8 +96,8 @@ static void mehcached_zipf_init(struct zipf_gen_state *state, uint64_t n,
         state->alpha = 1. / (1. - theta);
         state->thres = 1. + mehcached_pow_approx(0.5, theta);
     } else {
-        state->alpha = 0.; // unused
-        state->thres = 0.; // unused
+        state->alpha = 0.;  // unused
+        state->thres = 0.;  // unused
     }
     state->last_n = 0;
     state->zetan = 0.;
@@ -105,10 +107,9 @@ static void mehcached_zipf_init(struct zipf_gen_state *state, uint64_t n,
     state->rand_state = rand_seed;
 }
 
-static void mehcached_zipf_init_copy(struct zipf_gen_state *state,
-                                     const struct zipf_gen_state *src_state,
+static void mehcached_zipf_init_copy(struct zipf_gen_state* state,
+                                     const struct zipf_gen_state* src_state,
                                      uint64_t rand_seed) {
-
     (void)mehcached_zipf_init_copy;
     assert(rand_seed < (1UL << 48));
     memcpy(state, src_state, sizeof(struct zipf_gen_state));
@@ -118,12 +119,14 @@ static void mehcached_zipf_init_copy(struct zipf_gen_state *state,
     state->rand_state = rand_seed;
 }
 
-static void mehcached_zipf_change_n(struct zipf_gen_state *state, uint64_t n) {
+static void mehcached_zipf_change_n(struct zipf_gen_state* state, uint64_t n) {
     (void)mehcached_zipf_change_n;
     state->n = n;
 }
 
-static double mehcached_zeta(uint64_t last_n, double last_sum, uint64_t n,
+static double mehcached_zeta(uint64_t last_n,
+                             double last_sum,
+                             uint64_t n,
                              double theta) {
     if (last_n > n) {
         last_n = 0;
@@ -136,7 +139,7 @@ static double mehcached_zeta(uint64_t last_n, double last_sum, uint64_t n,
     return last_sum;
 }
 
-static uint64_t mehcached_zipf_next(struct zipf_gen_state *state) {
+static uint64_t mehcached_zipf_next(struct zipf_gen_state* state) {
     if (state->last_n != state->n) {
         if (state->theta > 0. && state->theta < 1.) {
             state->zetan = mehcached_zeta(state->last_n, state->zetan, state->n,
@@ -172,14 +175,13 @@ static uint64_t mehcached_zipf_next(struct zipf_gen_state *state) {
         else if (uz < state->thres)
             return 1UL;
         else
-            return (uint64_t)(
-                state->dbl_n *
-                mehcached_pow_approx(state->eta * (u - 1.) + 1., state->alpha));
+            return (uint64_t)(state->dbl_n *
+                              mehcached_pow_approx(state->eta * (u - 1.) + 1.,
+                                                   state->alpha));
     }
 }
 
 void mehcached_test_zipf(double theta) {
-
     (void)(mehcached_test_zipf);
 
     double zetan = 0.;

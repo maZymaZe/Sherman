@@ -5,10 +5,8 @@
 #include "WRLock.h"
 
 class LocalLockQueue {
-
-  const static int kMaxQueueSize = 256;
-  static_assert(kMaxQueueSize > MAX_APP_THREAD * define::kMaxCoro, "XX");
-
+    const static int kMaxQueueSize = 256;
+    static_assert(kMaxQueueSize > MAX_APP_THREAD * define::kMaxCoro, "XX");
 };
 
-#endif // _LOCAL_LOCK_QUEUE_H_
+#endif  // _LOCAL_LOCK_QUEUE_H_

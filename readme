@@ -1,0 +1,2 @@
+use sudo bash ../script/restartMemc.sh in ./build
+use hugepage.sh after reboot
