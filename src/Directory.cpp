@@ -148,6 +148,7 @@ re_copy:
     return true;
 }
 void Directory::process_message(const RawMessage* m) {
+    printf("process message%d\n",(int)m->type);
     RawMessage* send = nullptr;
     switch (m->type) {
         case RpcType::MALLOC: {
@@ -176,6 +177,7 @@ void Directory::process_message(const RawMessage* m) {
             SearchResult tmp;
             send->success = rpc_page_search(m->page_addr, m->key, tmp);
             send->sr = tmp;
+            break;
         }
         default:
             assert(false);

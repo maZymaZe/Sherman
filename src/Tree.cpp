@@ -816,6 +816,7 @@ bool Tree::page_search(GlobalAddress page_addr,
                        int coro_id,
                        bool from_cache,
                        TmpResult* t_res) {
+    printf("pagesearch\n");
     RawMessage m;
     RawMessage* rs;
     m.type = RpcType::SEARCH;
