@@ -190,6 +190,8 @@ constexpr uint32_t kInternalPageSize =
 constexpr uint32_t kLeafPageSize =
     spanSize * leafEntrySizes[idx_1][idx_2] + headerSizes[idx_1] + 12;
 
+constexpr uint32_t kkPageSize =
+    (kInternalPageSize > kLeafPageSize) ? kInternalPageSize : kLeafPageSize;
 __inline__ unsigned long long rdtsc(void) {
     unsigned hi, lo;
     __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));

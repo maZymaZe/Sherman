@@ -3,14 +3,20 @@
 
 #include "AbstractMessageConnection.h"
 #include "GlobalAddress.h"
+#include "Key.h"
 
 #include <thread>
+#include "SearchResult.h"
 
 enum RpcType : uint8_t {
     MALLOC,
     FREE,
     NEW_ROOT,
     NOP,
+    SEARCH,
+    LEAFSTORE,
+    INTERNALSTORE,
+    LEAFDEL
 };
 
 struct RawMessage {
@@ -20,7 +26,15 @@ struct RawMessage {
     uint16_t app_id;
 
     GlobalAddress addr;  // for malloc
+
     int level;
+    Key key;
+    uint64_t page_addr;
+    // uint64_t value;
+
+    bool success;
+    SearchResult sr;
+
 } __attribute__((packed));
 
 class RawMessageConnection : public AbstractMessageConnection {

@@ -1,8 +1,12 @@
 #include "Directory.h"
 #include "Common.h"
 
+#include <cstdlib>
+#include <cstring>
 #include "Connection.h"
 
+#include "SearchResult.h"
+#include "Tree.h"
 // #include <gperftools/profiler.h>
 
 GlobalAddress g_root_ptr = GlobalAddress::Null();
@@ -65,6 +69,84 @@ void Directory::dirThread() {
     }
 }
 
+bool Directory::rpc_page_search(uint64_t page_addr,
+                                const Key& k,
+                                SearchResult& result) {
+    char page_buffer[kkPageSize + 3];
+    int counter = 0;
+re_copy:
+    if (++counter > 100) {
+        printf("re read too many times\n");
+        sleep(1);
+    }
+    memcpy(page_buffer, (void*)page_addr, kkPageSize);
+    assert(STRUCT_OFFSET(LeafPage, hdr) == STRUCT_OFFSET(InternalPage, hdr));
+    auto header = (Header*)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
+    memset(&result, 0, sizeof(result));
+    result.is_leaf = header->leftmost_ptr == GlobalAddress::Null();
+    result.level = header->level;
+    if (result.is_leaf) {
+        LeafPage* page = (LeafPage*)page_buffer;
+        if (!page->check_consistent()) {
+            goto re_copy;
+        }
+        if (result.level != 0) {
+            return false;
+        }
+        // never stale
+        if (k >= page->hdr.highest) {  // should turn right
+            result.slibing = page->hdr.sibling_ptr;
+            return true;
+        }
+        if (k < page->hdr.lowest) {
+            // assert(false);
+            return false;
+        }
+        for (int i = 0; i < kLeafCardinality; ++i) {
+            auto& r = page->records[i];
+            if (r.key == k && r.value != kValueNull &&
+                r.f_version == r.r_version) {
+                result.val = r.value;
+                break;
+            }
+        }
+    } else {
+        auto page = (InternalPage*)page_buffer;
+        if (!page->check_consistent()) {
+            goto re_copy;
+        }
+        if (result.level == 0)
+            return false;
+        if (k >= page->hdr.highest) {
+            result.slibing = page->hdr.sibling_ptr;
+            return true;
+        }
+        if (k < page->hdr.lowest) {
+            return false;
+        }
+        assert(k >= page->hdr.lowest);
+        if (k >= page->hdr.highest) {
+            result.slibing = page->hdr.sibling_ptr;
+            return true;
+        }
+        assert(k < page->hdr.highest);
+
+        auto cnt = page->hdr.last_index + 1;
+        if (k < page->records[0].key) {
+            result.next_level = page->hdr.leftmost_ptr;
+            return true;
+        }
+
+        for (int i = 1; i < cnt; ++i) {
+            if (k < page->records[i].key) {
+                result.next_level = page->records[i - 1].ptr;
+                return true;
+            }
+        }
+        result.next_level = page->records[cnt - 1].ptr;
+    }
+    return true;
+}
 void Directory::process_message(const RawMessage* m) {
     RawMessage* send = nullptr;
     switch (m->type) {
@@ -89,6 +171,12 @@ void Directory::process_message(const RawMessage* m) {
             break;
         }
 
+        case RpcType::SEARCH: {
+            send = (RawMessage*)dCon->message->getSendPool();
+            SearchResult tmp;
+            send->success = rpc_page_search(m->page_addr, m->key, tmp);
+            send->sr = tmp;
+        }
         default:
             assert(false);
     }

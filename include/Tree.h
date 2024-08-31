@@ -7,7 +7,9 @@
 #include <iostream>
 #include "Common.h"
 #include "DSM.h"
+#include "Directory.h"
 #include "Key.h"
+#include "SearchResult.h"
 
 class IndexCache;
 
@@ -35,14 +37,6 @@ class RequstGen {
 class InternalPage;
 class LeafPage;
 
-struct SearchResult {
-    bool is_leaf;
-    uint8_t level;
-    GlobalAddress slibing;
-    GlobalAddress next_level;
-    Value val;
-};
-
 class Header {
    private:
     GlobalAddress leftmost_ptr;
@@ -56,6 +50,7 @@ class Header {
     friend class LeafPage;
     friend class Tree;
     friend class IndexCache;
+    friend class Directory;
 
    public:
     Header() {
@@ -144,6 +139,7 @@ class InternalPage {
 
     friend class Tree;
     friend class IndexCache;
+    friend class Directory;
 
    public:
     // this is called when tree grows
@@ -221,6 +217,7 @@ class LeafPage {
     uint8_t rear_version;
 
     friend class Tree;
+    friend class Directory;
 
    public:
     LeafPage(uint32_t level = 0) {
