@@ -42,7 +42,7 @@
 
 #define ROUND_UP(x, n) (((x) + (1 << (n)) - 1) & ~((1 << (n)) - 1))
 
-#define MESSAGE_SIZE 96  // byte
+#define MESSAGE_SIZE 128  // byte
 
 #define POST_RECV_PER_RC_QP 4096
 

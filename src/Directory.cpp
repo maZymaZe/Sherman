@@ -74,6 +74,7 @@ bool Directory::rpc_page_search(uint64_t page_addr,
                                 SearchResult& result) {
     char page_buffer[kkPageSize + 3];
     int counter = 0;
+    page_addr+=(uint64_t)(dCon->dsmPool);
 re_copy:
     if (++counter > 100) {
         printf("re read too many times\n");
@@ -148,7 +149,6 @@ re_copy:
     return true;
 }
 void Directory::process_message(const RawMessage* m) {
-    printf("process message%d\n",(int)m->type);
     RawMessage* send = nullptr;
     switch (m->type) {
         case RpcType::MALLOC: {
