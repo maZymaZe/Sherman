@@ -52,7 +52,7 @@
 
 // { app thread
 #define MAX_APP_THREAD \
-    3  // one additional thread for data statistics(main thread)  [CONFIG]
+    6  // one additional thread for data statistics(main thread)  [CONFIG]
 
 #define APP_MESSAGE_NR 96
 
