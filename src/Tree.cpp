@@ -817,18 +817,18 @@ bool Tree::page_search(GlobalAddress page_addr,
                        bool from_cache,
                        TmpResult* t_res) {
     //printf("pagesearch\n");
-    RawMessage m;
-    RawMessage* rs;
-    m.type = RpcType::SEARCH;
-    m.key = k;
-    m.page_addr = page_addr.offset;
-    dsm->rpc_call_dir(m, page_addr.nodeID);
-    rs = dsm->rpc_wait();
-    if (rs->success) {
-        result = rs->sr;
-        path_stack[coro_id][result.level] = page_addr;
-        return rs->success;
-    }
+    // RawMessage m;
+    // RawMessage* rs;
+    // m.type = RpcType::SEARCH;
+    // m.key = k;
+    // m.page_addr = page_addr.offset;
+    // dsm->rpc_call_dir(m, page_addr.nodeID);
+    // rs = dsm->rpc_wait();
+    // if (rs->success) {
+    //     result = rs->sr;
+    //     path_stack[coro_id][result.level] = page_addr;
+    //     return rs->success;
+    // }
 
     auto page_buffer = (dsm->get_rbuf(coro_id)).get_page_buffer();
     assert(STRUCT_OFFSET(LeafPage, hdr) == STRUCT_OFFSET(InternalPage, hdr));
