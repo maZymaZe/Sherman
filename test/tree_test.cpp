@@ -37,8 +37,9 @@ int main() {
 
     std::map<Key, Value> ret;
     tree->range_query(int2key(1), int2key(800), ret);
-    for (uint64_t j = 1; j < 800; ++j)
-        assert(ret[int2key(j)] == j * 3);
+    for (auto kv : ret) {
+        assert(kv.second == key2int(kv.first) * 3);
+    }
 
     printf("range query passed.\n");
     printf("Hello\n");
