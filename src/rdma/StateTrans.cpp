@@ -44,7 +44,7 @@ bool modifyQPtoRTR(struct ibv_qp* qp,
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RTR;
 
-    attr.path_mtu = IBV_MTU_4096;  //  [CONFIG]
+    attr.path_mtu = IBV_MTU_1024;  //  [CONFIG]
     attr.dest_qp_num = remoteQPN;
     attr.rq_psn = PSN;
 
@@ -164,7 +164,7 @@ bool modifyDCtoRTS(struct ibv_qp* qp,
     }
 
     attr.qp_state = IBV_QPS_RTR;
-    attr.path_mtu = IBV_MTU_4096;  //  [CONFIG]
+    attr.path_mtu = IBV_MTU_1024;  //  [CONFIG]
 
     fillAhAttr(&attr.ah_attr, remoteLid, remoteGid, context);
     if (ibv_exp_modify_qp(
