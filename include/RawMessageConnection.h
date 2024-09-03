@@ -14,9 +14,9 @@ enum RpcType : uint8_t {
     NEW_ROOT,
     NOP,
     SEARCH,
-    LEAFSTORE,
-    INTERNALSTORE,
-    LEAFDEL
+    LOCK,
+    UNLOCK,
+    LOCK_SUCCESS
 };
 
 struct RawMessage {

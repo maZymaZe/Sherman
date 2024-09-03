@@ -1,6 +1,7 @@
 #include "Directory.h"
 #include "Common.h"
 
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include "Connection.h"
@@ -31,7 +32,7 @@ Directory::Directory(DirectoryConnection* dCon,
         dsm_start.offset = per_directory_dsm_size * dirID;
         chunckAlloc = new GlobalAllocator(dsm_start, per_directory_dsm_size);
     }
-
+    // single thread no concurrency control
     dirTh = new std::thread(&Directory::dirThread, this);
 }
 
@@ -68,13 +69,31 @@ void Directory::dirThread() {
         }
     }
 }
-
+bool Directory::rpc_lock(uint64_t addr, uint16_t node_id, uint16_t app_id) {
+    uint32_t id = ((uint32_t)node_id << 16) | app_id;
+    lockqueues[addr].push(id);
+    if (lockqueues[addr].front() == id)
+        return true;
+    return false;
+}
+uint64_t Directory::rpc_unlock(uint64_t addr,
+                               uint16_t node_id,
+                               uint16_t app_id) {
+    uint32_t id = ((uint32_t)node_id << 16) | app_id;
+    assert(lockqueues.count(addr) && !lockqueues[addr].empty() &&
+           lockqueues[addr].front() == id);
+    lockqueues[addr].pop();
+    if (!lockqueues[addr].empty()) {
+        return (1ll << 32) | lockqueues[addr].front();
+    }
+    return 0;
+}
 bool Directory::rpc_page_search(uint64_t page_addr,
                                 const Key& k,
                                 SearchResult& result) {
     char page_buffer[kkPageSize + 3];
     int counter = 0;
-    page_addr+=(uint64_t)(dCon->dsmPool);
+    page_addr += (uint64_t)(dCon->dsmPool);
 re_copy:
     if (++counter > 100) {
         printf("re read too many times\n");
@@ -177,6 +196,24 @@ void Directory::process_message(const RawMessage* m) {
             SearchResult tmp;
             send->success = rpc_page_search(m->page_addr, m->key, tmp);
             send->sr = tmp;
+            break;
+        }
+        case RpcType::LOCK: {
+            bool ret = rpc_lock(m->page_addr, m->node_id, m->node_id);
+            if (ret) {
+                send = (RawMessage*)dCon->message->getSendPool();
+                send->type = RpcType::LOCK_SUCCESS;
+            }
+            break;
+        }
+        case RpcType::UNLOCK: {
+            uint64_t ret = rpc_unlock(m->page_addr, m->node_id, m->app_id);
+            if (ret) {
+                send = (RawMessage*)dCon->message->getSendPool();
+                send->type = RpcType::LOCK_SUCCESS;
+                dCon->sendMessage2App(send, (ret >> 16) & 0xffff, ret & 0xffff);
+                send = nullptr;
+            }
             break;
         }
         default:

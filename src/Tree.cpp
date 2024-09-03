@@ -235,6 +235,15 @@ inline bool Tree::try_lock_addr(GlobalAddress lock_addr,
         return true;
     }
 
+    RawMessage m;
+    RawMessage* rs;
+    m.type = RpcType::LOCK;
+    m.page_addr = lock_addr.offset;
+    dsm->rpc_call_dir(m, lock_addr.nodeID);
+    rs = dsm->rpc_wait();
+    assert(rs->type == RpcType::LOCK_SUCCESS);
+    return true;
+
     {
         uint64_t retry_cnt = 0;
         uint64_t pre_tag = 0;
@@ -284,6 +293,13 @@ inline void Tree::unlock_addr(GlobalAddress lock_addr,
         return;
     }
 
+    RawMessage m;
+    m.type = RpcType::UNLOCK;
+    m.page_addr = lock_addr.offset;
+    dsm->rpc_call_dir(m, lock_addr.nodeID);
+    releases_local_lock(lock_addr);
+    return;
+
     auto cas_buf = dsm->get_rbuf(coro_id).get_cas_buffer();
 
     *cas_buf = 0;
@@ -326,24 +342,29 @@ void Tree::write_page_and_unlock(char* page_buffer,
     rs[0].size = page_size;
     rs[0].is_on_chip = false;
 
-    auto cas_buf = dsm->get_rbuf(coro_id).get_cas_buffer();
-    *cas_buf = 0;
-    rs[1].source = (uint64_t)cas_buf;  // [DEBUG]
-    rs[1].dest = lock_addr;
-    rs[1].size = sizeof(uint64_t);
+    //     auto cas_buf = dsm->get_rbuf(coro_id).get_cas_buffer();
+    //     *cas_buf = 0;
+    //     rs[1].source = (uint64_t)cas_buf;  // [DEBUG]
+    //     rs[1].dest = lock_addr;
+    //     rs[1].size = sizeof(uint64_t);
 
-#ifdef CONFIG_ENABLE_EMBEDDING_LOCK
-    rs[1].is_on_chip = false;
-#else
-    rs[1].is_on_chip = true;
-#endif
+    // #ifdef CONFIG_ENABLE_EMBEDDING_LOCK
+    //     rs[1].is_on_chip = false;
+    // #else
+    //     rs[1].is_on_chip = true;
+    // #endif
 
-    *(uint64_t*)rs[1].source = 0;
+    //     *(uint64_t*)rs[1].source = 0;
     if (async) {
-        dsm->write_batch(rs, 2, false);
+        dsm->write_batch(rs, 1, false);
     } else {
-        dsm->write_batch_sync(rs, 2, cxt);
+        dsm->write_batch_sync(rs, 1, cxt);
     }
+
+    RawMessage m;
+    m.type = RpcType::UNLOCK;
+    m.page_addr = lock_addr.offset;
+    dsm->rpc_call_dir(m, lock_addr.nodeID);
 
     releases_local_lock(lock_addr);
 }
@@ -816,19 +837,19 @@ bool Tree::page_search(GlobalAddress page_addr,
                        int coro_id,
                        bool from_cache,
                        TmpResult* t_res) {
-    //printf("pagesearch\n");
-    // RawMessage m;
-    // RawMessage* rs;
-    // m.type = RpcType::SEARCH;
-    // m.key = k;
-    // m.page_addr = page_addr.offset;
-    // dsm->rpc_call_dir(m, page_addr.nodeID);
-    // rs = dsm->rpc_wait();
-    // if (rs->success) {
-    //     result = rs->sr;
-    //     path_stack[coro_id][result.level] = page_addr;
-    //     return rs->success;
-    // }
+    // printf("pagesearch\n");
+    //  RawMessage m;
+    //  RawMessage* rs;
+    //  m.type = RpcType::SEARCH;
+    //  m.key = k;
+    //  m.page_addr = page_addr.offset;
+    //  dsm->rpc_call_dir(m, page_addr.nodeID);
+    //  rs = dsm->rpc_wait();
+    //  if (rs->success) {
+    //      result = rs->sr;
+    //      path_stack[coro_id][result.level] = page_addr;
+    //      return rs->success;
+    //  }
 
     auto page_buffer = (dsm->get_rbuf(coro_id)).get_page_buffer();
     assert(STRUCT_OFFSET(LeafPage, hdr) == STRUCT_OFFSET(InternalPage, hdr));
