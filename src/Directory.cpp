@@ -71,19 +71,26 @@ void Directory::dirThread() {
 }
 bool Directory::rpc_lock(uint64_t addr, uint16_t node_id, uint16_t app_id) {
     uint32_t id = ((uint32_t)node_id << 16) | app_id;
+    // printf("%d-%d trylock %lx\n", node_id, app_id, addr);
     lockqueues[addr].push(id);
-    if (lockqueues[addr].front() == id)
+    if (lockqueues[addr].size() == 1) {
+        // printf("%d-%dget lock %lx\n", node_id, app_id, addr);
         return true;
+    }
     return false;
 }
 uint64_t Directory::rpc_unlock(uint64_t addr,
                                uint16_t node_id,
                                uint16_t app_id) {
     uint32_t id = ((uint32_t)node_id << 16) | app_id;
-    assert(lockqueues.count(addr) && !lockqueues[addr].empty() &&
-           lockqueues[addr].front() == id);
+    // printf("%d-%d unlock %lx\n", node_id, app_id, addr);
+    assert(lockqueues.count(addr));
+    assert(!lockqueues[addr].empty());
+    assert((lockqueues[addr].front() >> 16) == node_id);
     lockqueues[addr].pop();
     if (!lockqueues[addr].empty()) {
+        // printf("%d-%dget lock %lx\n", (lockqueues[addr].front()) >> 16,
+        //        lockqueues[addr].front() & 0xffff, addr);
         return (1ll << 32) | lockqueues[addr].front();
     }
     return 0;
@@ -199,10 +206,11 @@ void Directory::process_message(const RawMessage* m) {
             break;
         }
         case RpcType::LOCK: {
-            bool ret = rpc_lock(m->page_addr, m->node_id, m->node_id);
+            bool ret = rpc_lock(m->page_addr, m->node_id, m->app_id);
             if (ret) {
                 send = (RawMessage*)dCon->message->getSendPool();
                 send->type = RpcType::LOCK_SUCCESS;
+                send->page_addr = m->page_addr;
             }
             break;
         }
@@ -211,6 +219,7 @@ void Directory::process_message(const RawMessage* m) {
             if (ret) {
                 send = (RawMessage*)dCon->message->getSendPool();
                 send->type = RpcType::LOCK_SUCCESS;
+                send->page_addr = m->page_addr;
                 dCon->sendMessage2App(send, (ret >> 16) & 0xffff, ret & 0xffff);
                 send = nullptr;
             }
